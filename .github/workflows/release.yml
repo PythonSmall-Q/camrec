@@ -1,0 +1,130 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'package.json'
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version-changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get current version
+        id: get-version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $VERSION"
+
+      - name: Check if version changed
+        id: check
+        run: |
+          if git diff HEAD^ HEAD -- package.json | grep -q '"version"'; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Version has changed"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Version has not changed"
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.version-changed == 'true'
+    strategy:
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+        env:
+          # 使用官方源，不使用镜像
+          npm_config_registry: https://registry.npmjs.org/
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
+      - name: Build application
+        run: npm run build
+        env:
+          # 确保使用官方Electron下载源
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/*.exe
+            dist/*.msi
+          retention-days: 5
+
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: Release v${{ needs.check-version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.exe
+            dist/*.msi
+          body: |
+            ## 摄像头录制助手 v${{ needs.check-version.outputs.version }}
+            
+            ### 主要功能
+            - 📹 多摄像头支持：同时录制多个摄像头
+            - 🔍 实时预览：软件启动后自动显示所有摄像头画面
+            - 💾 智能存储管理：自动管理存储空间
+            - ✂️ 自动分割视频：按设定时间自动分割
+            - 🕐 时间戳水印：视频右下角自适应颜色时间戳
+            
+            ### 安装说明
+            1. 下载 `*.exe` 安装程序
+            2. 运行安装程序
+            3. 按提示完成安装
+            
+            ### 系统要求
+            - Windows 7 及以上
+            - 至少 2GB RAM
+            
+            ### 更新日志
+            请查看 [完整文档](https://github.com/${{ github.repository }}/blob/main/README.md)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>摄像头录制助手</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- 顶部工具栏 -->
+    <div class="toolbar">
+      <h1>📹 摄像头录制助手</h1>
+      <div class="toolbar-buttons">
+        <button id="settingsBtn" class="btn btn-secondary">⚙️ 设置</button>
+        <button id="refreshBtn" class="btn btn-secondary">🔄 刷新摄像头</button>
+        <button id="selectAllBtn" class="btn btn-secondary">✔️ 全选</button>
+        <button id="deselectAllBtn" class="btn btn-secondary">✖️ 取消全选</button>
+      </div>
+    </div>
+
+    <!-- 摄像头选择区域 -->
+    <div class="camera-selection">
+      <h2>选择要录制的摄像头</h2>
+      <div id="cameraList" class="camera-list">
+        <p class="loading">正在检测摄像头...</p>
+      </div>
+    </div>
+
+    <!-- 摄像头预览区域 -->
+    <div class="preview-section">
+      <div class="preview-header">
+        <h2>摄像头预览</h2>
+        <div class="recording-controls">
+          <button id="startRecordingBtn" class="btn btn-primary" disabled>▶️ 开始录制</button>
+          <button id="stopRecordingBtn" class="btn btn-danger" disabled>⏹️ 停止录制</button>
+          <span id="recordingStatus" class="status">未录制</span>
+          <span id="recordingTimer" class="timer">00:00:00</span>
+        </div>
+      </div>
+      <div id="previewGrid" class="preview-grid">
+        <p class="placeholder">正在加载摄像头...</p>
+      </div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div class="statusbar">
+      <span id="statusText">就绪</span>
+      <span id="storageInfo">存储: 0 GB / 10 GB</span>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
