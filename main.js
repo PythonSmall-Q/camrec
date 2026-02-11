@@ -11,6 +11,7 @@ app.commandLine.appendSwitch('disable-accelerated-video-decode');
 
 let mainWindow;
 let settingsWindow;
+let allowClose = false;
 let configPath = path.join(app.getPath('userData'), 'config.json');
 
 // 默认配置
@@ -18,7 +19,8 @@ let config = {
   savePath: path.join(os.homedir(), 'Videos', 'CamRec'),
   maxStorageGB: 10,
   segmentMinutes: 30,
-  selectedCameras: []
+  selectedCameras: [],
+  stopPasswordHash: ''
 };
 
 // 加载配置
@@ -64,9 +66,23 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
   
   // 开发时打开开发者工具
   // mainWindow.webContents.openDevTools();
+
+  mainWindow.on('close', (event) => {
+    if (allowClose) {
+      return;
+    }
+    event.preventDefault();
+    if (mainWindow) {
+      mainWindow.webContents.send('request-close');
+    }
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -154,6 +170,15 @@ ipcMain.on('select-save-path', (event) => {
 // 打开设置窗口
 ipcMain.on('open-settings', () => {
   createSettingsWindow();
+});
+
+// 处理关闭请求
+ipcMain.on('close-response', (event, allowed) => {
+  if (!mainWindow) return;
+  if (allowed) {
+    allowClose = true;
+    mainWindow.close();
+  }
 });
 
 // 检查存储空间

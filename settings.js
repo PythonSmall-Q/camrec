@@ -1,19 +1,29 @@
 const { ipcRenderer, shell } = require('electron');
+const crypto = require('crypto');
 
 const savePathInput = document.getElementById('savePath');
 const maxStorageInput = document.getElementById('maxStorage');
 const segmentMinutesInput = document.getElementById('segmentMinutes');
+const currentPasswordInput = document.getElementById('currentPassword');
+const newPasswordInput = document.getElementById('newPassword');
+const confirmPasswordInput = document.getElementById('confirmPassword');
 const selectPathBtn = document.getElementById('selectPathBtn');
 const saveBtn = document.getElementById('saveBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const openFolderBtn = document.getElementById('openFolderBtn');
 
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password, 'utf8').digest('hex');
+}
+
+let currentConfig = null;
+
 // 加载当前配置
 function loadSettings() {
-  const config = ipcRenderer.sendSync('get-config');
-  savePathInput.value = config.savePath;
-  maxStorageInput.value = config.maxStorageGB;
-  segmentMinutesInput.value = config.segmentMinutes;
+  currentConfig = ipcRenderer.sendSync('get-config');
+  savePathInput.value = currentConfig.savePath;
+  maxStorageInput.value = currentConfig.maxStorageGB;
+  segmentMinutesInput.value = currentConfig.segmentMinutes;
 }
 
 // 选择保存路径
@@ -44,6 +54,36 @@ saveBtn.addEventListener('click', () => {
     maxStorageGB: maxStorage,
     segmentMinutes: segmentMinutes
   };
+
+  const currentPassword = currentPasswordInput.value.trim();
+  const newPassword = newPasswordInput.value.trim();
+  const confirmPassword = confirmPasswordInput.value.trim();
+
+  if (newPassword || confirmPassword || currentPassword) {
+    if (!newPassword) {
+      alert('请输入新密码');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      alert('两次输入的新密码不一致');
+      return;
+    }
+
+    const hasExisting = currentConfig && currentConfig.stopPasswordHash;
+    if (hasExisting) {
+      if (!currentPassword) {
+        alert('请输入当前密码');
+        return;
+      }
+      const currentHash = hashPassword(currentPassword);
+      if (currentHash !== currentConfig.stopPasswordHash) {
+        alert('当前密码不正确');
+        return;
+      }
+    }
+
+    newConfig.stopPasswordHash = hashPassword(newPassword);
+  }
   
   ipcRenderer.sendSync('save-config', newConfig);
   alert('设置已保存');

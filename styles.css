@@ -199,6 +199,63 @@ body {
   border-radius: 4px;
 }
 
+/* 密码对话框 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-overlay.visible {
+  display: flex;
+}
+
+.modal {
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 8px;
+  padding: 20px;
+  width: 360px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.modal h3 {
+  margin-bottom: 10px;
+  color: #4fc3f7;
+  font-size: 16px;
+}
+
+.modal-message {
+  color: #bbb;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.modal-body input {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid #3d3d3d;
+  border-radius: 4px;
+  background: #1e1e1e;
+  color: #e0e0e0;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.modal-confirm {
+  display: none;
+}
+
 .preview-grid {
   flex: 1;
   display: grid;

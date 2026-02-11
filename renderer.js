@@ -1,6 +1,7 @@
 const { ipcRenderer } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // 全局变量
 let availableCameras = [];
@@ -15,6 +16,78 @@ let recordingStartTime = null;
 let timerInterval = null;
 let segmentInterval = null;
 let config = {};
+
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password, 'utf8').digest('hex');
+}
+
+let activePasswordResolve = null;
+let activePasswordMode = 'verify';
+
+function showPasswordModal({ mode, title, message }) {
+  return new Promise((resolve) => {
+    activePasswordResolve = resolve;
+    activePasswordMode = mode;
+    passwordTitle.textContent = title;
+    passwordMessage.textContent = message || '';
+    passwordInput.value = '';
+    passwordConfirmInput.value = '';
+    passwordConfirmGroup.style.display = mode === 'set' ? 'block' : 'none';
+    passwordModal.classList.add('visible');
+    passwordModal.setAttribute('aria-hidden', 'false');
+    setTimeout(() => passwordInput.focus(), 0);
+  });
+}
+
+function closePasswordModal(value) {
+  passwordModal.classList.remove('visible');
+  passwordModal.setAttribute('aria-hidden', 'true');
+  if (activePasswordResolve) {
+    activePasswordResolve(value);
+    activePasswordResolve = null;
+  }
+}
+
+async function ensureStopPasswordSet() {
+  if (config.stopPasswordHash) return;
+
+  while (!config.stopPasswordHash) {
+    const password = await showPasswordModal({
+      mode: 'set',
+      title: '设置停止录制密码',
+      message: '首次使用需要设置密码'
+    });
+
+    if (!password) {
+      alert('必须设置密码才能继续使用。');
+      continue;
+    }
+
+    const stopPasswordHash = hashPassword(password);
+    ipcRenderer.sendSync('save-config', { stopPasswordHash });
+    config.stopPasswordHash = stopPasswordHash;
+  }
+}
+
+async function verifyStopPassword() {
+  if (!config.stopPasswordHash) return true;
+
+  const input = await showPasswordModal({
+    mode: 'verify',
+    title: '验证密码',
+    message: '请输入停止/关闭密码'
+  });
+
+  if (!input) return false;
+
+  const hashed = hashPassword(input.trim());
+  if (hashed !== config.stopPasswordHash) {
+    alert('密码错误');
+    return false;
+  }
+
+  return true;
+}
 
 function getStreamInfo(stream) {
   const track = stream.getVideoTracks()[0];
@@ -39,10 +112,19 @@ const recordingStatus = document.getElementById('recordingStatus');
 const recordingTimer = document.getElementById('recordingTimer');
 const statusText = document.getElementById('statusText');
 const storageInfo = document.getElementById('storageInfo');
+const passwordModal = document.getElementById('passwordModal');
+const passwordTitle = document.getElementById('passwordTitle');
+const passwordMessage = document.getElementById('passwordMessage');
+const passwordInput = document.getElementById('passwordInput');
+const passwordConfirmGroup = document.getElementById('passwordConfirmGroup');
+const passwordConfirmInput = document.getElementById('passwordConfirmInput');
+const passwordCancelBtn = document.getElementById('passwordCancelBtn');
+const passwordOkBtn = document.getElementById('passwordOkBtn');
 
 // 初始化
 async function init() {
   config = ipcRenderer.sendSync('get-config');
+  await ensureStopPasswordSet();
   await detectCameras();
   
   // 自动开始预览所有摄像头
@@ -729,7 +811,12 @@ function updateStorageInfo() {
 
 // 事件监听
 startRecordingBtn.addEventListener('click', startRecording);
-stopRecordingBtn.addEventListener('click', stopRecording);
+stopRecordingBtn.addEventListener('click', async () => {
+  if (!isRecording) return;
+  const ok = await verifyStopPassword();
+  if (!ok) return;
+  stopRecording();
+});
 settingsBtn.addEventListener('click', () => {
   ipcRenderer.send('open-settings');
 });
@@ -763,6 +850,52 @@ deselectAllBtn.addEventListener('click', () => {
 ipcRenderer.on('config-updated', (event, newConfig) => {
   config = newConfig;
   updateStorageInfo();
+});
+
+ipcRenderer.on('request-close', async () => {
+  const ok = await verifyStopPassword();
+  if (ok && isRecording) {
+    stopRecording();
+  }
+  ipcRenderer.send('close-response', ok);
+});
+
+passwordCancelBtn.addEventListener('click', () => {
+  closePasswordModal(null);
+});
+
+passwordOkBtn.addEventListener('click', () => {
+  const value = passwordInput.value.trim();
+  if (!value) {
+    alert('请输入密码');
+    return;
+  }
+
+  if (activePasswordMode === 'set') {
+    const confirmValue = passwordConfirmInput.value.trim();
+    if (!confirmValue) {
+      alert('请确认密码');
+      return;
+    }
+    if (value !== confirmValue) {
+      alert('两次输入的密码不一致');
+      return;
+    }
+  }
+
+  closePasswordModal(value);
+});
+
+passwordInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    passwordOkBtn.click();
+  }
+});
+
+passwordConfirmInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    passwordOkBtn.click();
+  }
 });
 
 // 页面加载完成后初始化
