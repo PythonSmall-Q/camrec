@@ -31,12 +31,17 @@ jobs:
       - name: Check if version changed
         id: check
         run: |
-          if git diff HEAD^ HEAD -- package.json | grep -q '"version"'; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Version has changed"
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            if git diff HEAD^ HEAD -- package.json | grep -q '"version"'; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "Version has changed"
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "Version has not changed"
+            fi
           else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "Version has not changed"
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "First commit - proceeding with build"
           fi
 
   build:
@@ -69,6 +74,7 @@ jobs:
           # 确保使用官方Electron下载源
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
           ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

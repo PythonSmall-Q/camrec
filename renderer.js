@@ -3,6 +3,65 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// 日志系统
+let logFile = null;
+let logFilePath = null;
+
+function initLogging() {
+  try {
+    const savePath = ipcRenderer.sendSync('get-save-path');
+    logFilePath = path.join(savePath, 'camrec.log');
+    // 如果日志文件过大（>10MB），清空它
+    if (fs.existsSync(logFilePath)) {
+      const stats = fs.statSync(logFilePath);
+      if (stats.size > 10 * 1024 * 1024) {
+        fs.truncateSync(logFilePath, 0);
+      }
+    }
+  } catch (err) {
+    console.error('初始化日志系统失败:', err);
+  }
+}
+
+function writeLog(level, message, ...args) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] [${level}] ${message} ${args.length > 0 ? JSON.stringify(args) : ''}`;
+  
+  // 输出到控制台
+  if (level === 'ERROR') {
+    console.error(logMessage, ...args);
+  } else if (level === 'WARN') {
+    console.warn(logMessage, ...args);
+  } else {
+    console.log(logMessage, ...args);
+  }
+  
+  // 写入日志文件
+  if (logFilePath) {
+    try {
+      fs.appendFileSync(logFilePath, logMessage + '\n');
+    } catch (err) {
+      // 日志文件写入失败，仅输出到控制台
+    }
+  }
+}
+
+// 全局日志函数
+window.appLog = {
+  info: (msg, ...args) => writeLog('INFO', msg, ...args),
+  warn: (msg, ...args) => writeLog('WARN', msg, ...args),
+  error: (msg, ...args) => writeLog('ERROR', msg, ...args)
+};
+
+// 为全局错误处理添加日志
+window.addEventListener('error', (event) => {
+  appLog.error('未捕获的错误:', event.error);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  appLog.error('未处理的 Promise 拒绝:', event.reason);
+});
+
 // 全局变量
 let availableCameras = [];
 let selectedCameras = [];
@@ -16,6 +75,10 @@ let recordingStartTime = null;
 let timerInterval = null;
 let segmentInterval = null;
 let config = {};
+
+// 摄像头重连管理
+let cameraReconnectMap = {};  // 记录每个摄像头的重连状态和间隔ID
+let cameraStreamIndexMap = {};  // 记录 deviceId -> 摄像头索引 的映射
 
 function hashPassword(password) {
   return crypto.createHash('sha256').update(password, 'utf8').digest('hex');
@@ -99,6 +162,198 @@ function getStreamInfo(stream) {
   return { width, height, frameRate };
 }
 
+// 为录制流添加连接监视（自动重连）
+function monitorCameraConnection(deviceId, index) {
+  const stream = recordingStreams[index];
+  if (!stream) return;
+  
+  const videoTrack = stream.getVideoTracks()[0];
+  if (!videoTrack) return;
+  
+  const cameraName = availableCameras.find(c => c.deviceId === deviceId)?.label || `摄像头${index + 1}`;
+  
+  // 监听视频轨道状态变化
+  videoTrack.onended = () => {
+    appLog.warn(`${cameraName} 连接断开，将尝试自动重新连接`);
+    // 标记需要重连
+    cameraReconnectMap[deviceId] = { needsReconnect: true, retryCount: 0 };
+  };
+  
+  // 监听轨道信息变化
+  if (videoTrack.onchanged) {
+    videoTrack.onchanged = () => {
+      // 定期检查轨道是否仍然活跃
+      if (videoTrack.readyState === 'ended') {
+        appLog.warn(`${cameraName} 状态变为已停止`);
+      }
+    };
+  }
+}
+
+// 尝试重新连接一个摄像头
+async function reconnectCamera(deviceId, index) {
+  if (!isRecording) return false;
+  
+  const cameraName = availableCameras.find(c => c.deviceId === deviceId)?.label || `摄像头${index + 1}`;
+  
+  try {
+    appLog.info(`正在重新连接 ${cameraName}...`);
+    
+    // 停止旧的流
+    const oldStream = recordingStreams[index];
+    if (oldStream) {
+      oldStream.getTracks().forEach(track => track.stop());
+    }
+    
+    // 停止旧的 canvas 流
+    const oldCanvasStream = canvasStreams[index];
+    if (oldCanvasStream && oldCanvasStream.stopDrawing) {
+      oldCanvasStream.stopDrawing();
+    }
+    if (oldCanvasStream) {
+      oldCanvasStream.getTracks().forEach(track => track.stop());
+    }
+    
+    // 获取新的流
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId } },
+      audio: false
+    });
+    
+    recordingStreams[index] = newStream;
+    
+    // 获取或创建视频元素
+    const previewVideos = previewGrid.querySelectorAll('video');
+    const videoElement = previewVideos[index];
+    
+    if (videoElement) {
+      videoElement.srcObject = newStream;
+    }
+    
+    // 重新创建 canvas 流
+    const recordingStream = await createTimestampedStream(newStream, videoElement);
+    canvasStreams[index] = recordingStream;
+    
+    // 重新创建 MediaRecorder （带错误恢复）
+    const oldRecorder = mediaRecorders[index];
+    if (oldRecorder && oldRecorder.state !== 'inactive') {
+      try {
+        oldRecorder.stop();
+      } catch (err) {
+        appLog.warn(`停止旧 MediaRecorder 失败:`, err);
+      }
+    }
+    
+    const mediaRecorder = new MediaRecorder(recordingStream, {
+      mimeType: 'video/webm',
+      videoBitsPerSecond: 800000
+    });
+    
+    const recordedChunks = [];
+    
+    mediaRecorder.ondataavailable = (event) => {
+      try {
+        if (event.data && event.data.size > 0) {
+          recordedChunks.push(event.data);
+        }
+      } catch (err) {
+        appLog.error(`${cameraName} 数据收集失败:`, err);
+      }
+    };
+    
+    mediaRecorder.onstop = () => {
+      try {
+        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        saveRecording(blob, deviceId, index);
+      } catch (err) {
+        appLog.error(`${cameraName} 保存录制失败:`, err);
+      }
+    };
+    
+    mediaRecorder.onerror = (err) => {
+      appLog.error(`${cameraName} 录制错误:`, err);
+      // 标记需要重新启动
+      cameraReconnectMap[deviceId] = { needsReconnect: true, retryCount: 0 };
+    };
+    
+    mediaRecorder.start();
+    mediaRecorders[index] = mediaRecorder;
+    
+    // 重新监视连接
+    monitorCameraConnection(deviceId, index);
+    
+    appLog.info(`${cameraName} 已成功重新连接`);
+    
+    // 清除重连标记
+    delete cameraReconnectMap[deviceId];
+    
+    return true;
+  } catch (err) {
+    appLog.error(`重新连接 ${cameraName} 失败:`, err);
+    return false;
+  }
+}
+
+// 启动摄像头重连监视（每秒检查一次）
+function startCameraReconnectMonitor() {
+  const monitorInterval = setInterval(async () => {
+    if (!isRecording) {
+      clearInterval(monitorInterval);
+      return;
+    }
+    
+    // 检查哪些摄像头需要重连
+    for (const [deviceId, status] of Object.entries(cameraReconnectMap)) {
+      if (status.needsReconnect) {
+        const index = selectedCameras.indexOf(deviceId);
+        if (index !== -1) {
+          // 尝试重连
+          const success = await reconnectCamera(deviceId, index);
+          if (success) {
+            delete cameraReconnectMap[deviceId];
+          } else {
+            // 重连失败，增加重试计数
+            status.retryCount++;
+            if (status.retryCount > 10) {
+              // 超过10次重试，等待下次自动重试
+              status.retryCount = 0;
+            }
+          }
+        }
+      }
+    }
+  }, 1000);  // 每秒检查一次
+  
+  // 保存 interval ID 以便稍后清除
+  window.cameraReconnectMonitorInterval = monitorInterval;
+}
+
+// 停止摄像头重连监视
+function stopCameraReconnectMonitor() {
+  if (window.cameraReconnectMonitorInterval) {
+    clearInterval(window.cameraReconnectMonitorInterval);
+    window.cameraReconnectMonitorInterval = null;
+  }
+}
+
+// 禁用/启用摄像头选择（防止在录制时改变选择）
+function lockCameraSelection(lock) {
+  const checkboxes = cameraList.querySelectorAll('input[type="checkbox"]');
+  checkboxes.forEach(cb => cb.disabled = lock);
+  
+  refreshBtn.disabled = lock;
+  selectAllBtn.disabled = lock;
+  deselectAllBtn.disabled = lock;
+  
+  if (lock) {
+    cameraList.style.opacity = '0.5';
+    cameraList.style.pointerEvents = 'none';
+  } else {
+    cameraList.style.opacity = '1';
+    cameraList.style.pointerEvents = 'auto';
+  }
+}
+
 // 页面元素
 const cameraList = document.getElementById('cameraList');
 const previewGrid = document.getElementById('previewGrid');
@@ -123,19 +378,38 @@ const passwordOkBtn = document.getElementById('passwordOkBtn');
 
 // 初始化
 async function init() {
-  config = ipcRenderer.sendSync('get-config');
-  await ensureStopPasswordSet();
-  await detectCameras();
-  
-  // 自动开始预览所有摄像头
-  if (availableCameras.length > 0) {
-    await startPreview();
+  try {
+    appLog.info('应用启动...');
+    
+    // 初始化日志系统
+    initLogging();
+    appLog.info('日志系统已初始化');
+    
+    config = ipcRenderer.sendSync('get-config');
+    appLog.info('配置已加载', config);
+    
+    await ensureStopPasswordSet();
+    appLog.info('密码验证完成');
+    
+    await detectCameras();
+    appLog.info(`检测到 ${availableCameras.length} 个摄像头`);
+    
+    // 自动开始预览所有摄像头
+    if (availableCameras.length > 0) {
+      await startPreview();
+      appLog.info('预览已启动');
+    }
+    
+    updateStorageInfo();
+    
+    // 每30秒更新一次存储信息
+    setInterval(updateStorageInfo, 30000);
+    
+    appLog.info('应用初始化完成');
+  } catch (err) {
+    appLog.error('应用初始化失败:', err);
+    alert('应用初始化失败: ' + err.message);
   }
-  
-  updateStorageInfo();
-  
-  // 每30秒更新一次存储信息
-  setInterval(updateStorageInfo, 30000);
 }
 
 // 创建带时间戳的视频流
@@ -251,7 +525,7 @@ async function createTimestampedStream(videoStream, videoElement) {
             console.log(`Canvas 已绘制 ${frameCount} 帧`);
           }
         } catch (err) {
-          console.error('drawFrame 错误:', err);
+          appLog.error('drawFrame 错误:', err);
         }
         
         // 由定时器驱动
@@ -483,6 +757,8 @@ async function startRecording() {
   }
   
   try {
+    appLog.info(`开始录制，已选择 ${selectedCameras.length} 个摄像头`);
+    
     // 检查存储空间
     ipcRenderer.sendSync('check-storage');
     
@@ -493,6 +769,7 @@ async function startRecording() {
     mediaRecorders = [];
     recordingStreams = [];
     canvasStreams = [];
+    cameraReconnectMap = {};  // 初始化摄像头重连地图
     
     let firstStreamInfo = null;
     // 为每个选中的摄像头创建预览和录制
@@ -570,6 +847,9 @@ async function startRecording() {
       // 不使用 timeslice，ondataavailable 会在 stop 时触发
       mediaRecorder.start();
       mediaRecorders.push(mediaRecorder);
+      
+      // 为该摄像头添加连接监视
+      monitorCameraConnection(deviceId, i);
     }
     
     isRecording = true;
@@ -579,6 +859,9 @@ async function startRecording() {
     recordingStatus.textContent = '⏺️ 录制中';
     recordingStatus.className = 'status recording';
     
+    // 锁定摄像头选择，防止在录制时改变
+    lockCameraSelection(true);
+    
     // 启动计时器
     startTimer();
     
@@ -587,6 +870,9 @@ async function startRecording() {
     segmentInterval = setInterval(() => {
       restartRecording();
     }, segmentMs);
+    
+    // 启动摄像头重连监视
+    startCameraReconnectMonitor();
     
     if (firstStreamInfo) {
       const w = firstStreamInfo.width || '?';
@@ -598,7 +884,7 @@ async function startRecording() {
     }
     
   } catch (err) {
-    console.error('开始录制失败:', err);
+    appLog.error('开始录制失败:', err);
     alert('开始录制失败: ' + err.message);
     stopRecording();
   }
@@ -608,12 +894,12 @@ async function startRecording() {
 function stopRecording() {
   if (!isRecording) return;
   
-  console.log('开始停止录制...');
+  appLog.info('开始停止录制...');
   
   // 1. 先停止所有MediaRecorder（这会触发 onstop 事件保存文件）
   mediaRecorders.forEach((recorder, index) => {
     if (recorder.state !== 'inactive') {
-      console.log(`停止录制器 ${index + 1}`);
+      appLog.info(`停止录制器 ${index + 1}`);
       recorder.stop();
     }
   });
@@ -637,7 +923,7 @@ function stopRecording() {
       stream.getTracks().forEach(track => track.stop());
     });
     
-    console.log('所有流已停止');
+    appLog.info('所有流已停止');
   }, 1000);  // 等待1秒让数据处理完成
   
   // 清空预览
@@ -654,6 +940,10 @@ function stopRecording() {
     segmentInterval = null;
   }
   
+  // 停止摄像头重连监视
+  stopCameraReconnectMonitor();
+  cameraReconnectMap = {};
+  
   isRecording = false;
   recordingStartTime = null;
   startRecordingBtn.disabled = selectedCameras.length === 0;
@@ -663,15 +953,21 @@ function stopRecording() {
   recordingTimer.textContent = '00:00:00';
   statusText.textContent = '录制已停止';
   
+  // 解锁摄像头选择
+  lockCameraSelection(false);
+  appLog.info('录制已停止');
+  
   mediaRecorders = [];
   recordingStreams = [];
   canvasStreams = [];
   
   updateStorageInfo();
+  appLog.info('存储信息已更新');
   
   // 恢复预览
   setTimeout(() => {
     startPreview();
+    appLog.info('预览已恢复');
   }, 500);
 }
 
@@ -727,6 +1023,9 @@ async function restartRecording() {
 
     mediaRecorder.start();
     mediaRecorders.push(mediaRecorder);
+    
+    // 为该摄像头添加连接监视
+    monitorCameraConnection(deviceId, i);
   }
   
   recordingStartTime = new Date();
@@ -858,6 +1157,21 @@ ipcRenderer.on('request-close', async () => {
     stopRecording();
   }
   ipcRenderer.send('close-response', ok);
+});
+
+// 处理从托盘菜单的退出请求
+ipcRenderer.on('request-exit', async () => {
+  const ok = await verifyStopPassword();
+  if (ok) {
+    if (isRecording) {
+      // 等待录制停止
+      await new Promise(resolve => {
+        stopRecording();
+        setTimeout(resolve, 1000);
+      });
+    }
+    ipcRenderer.send('app-exit-request', true);
+  }
 });
 
 passwordCancelBtn.addEventListener('click', () => {
